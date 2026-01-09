@@ -1,43 +1,65 @@
-def save_to_supabase(videos):
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+import os
+import requests
+from datetime import datetime
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+
+COUNTRY = "SA"
+MAX_RESULTS = 10
+
+def fetch_trending_videos():
+    print("Fetching YouTube trending videos...")
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        "part": "snippet,statistics",
+        "chart": "mostPopular",
+        "regionCode": COUNTRY,
+        "maxResults": MAX_RESULTS,
+        "key": YOUTUBE_API_KEY
+    }
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()["items"]
+
+def save_to_supabase(videos):
+    print("Saving to Supabase...")
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Accept": "application/json",
-        # مهم للـ upsert مع unique index
-        "Prefer": "resolution=merge-duplicates,return=minimal",
+        "Prefer": "resolution=merge-duplicates"
     }
 
     rows = []
-    for video in videos:
-        snippet = video.get("snippet", {})
-        stats = video.get("statistics", {})
-
+    for v in videos:
         rows.append({
             "platform": "youtube",
             "country": COUNTRY,
-            "video_id": video.get("id"),
-            "title": snippet.get("title"),
-            "channel_title": snippet.get("channelTitle"),
-            "published_at": snippet.get("publishedAt"),  # YouTube RFC3339
-            "views": int(stats.get("viewCount", 0) or 0),
-            "likes": int(stats.get("likeCount", 0) or 0),
-            "comments": int(stats.get("commentCount", 0) or 0),
-            "fetched_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "video_id": v["id"],
+            "title": v["snippet"]["title"],
+            "channel_title": v["snippet"]["channelTitle"],
+            "published_at": v["snippet"]["publishedAt"],
+            "view_count": int(v["statistics"].get("viewCount", 0)),
+            "like_count": int(v["statistics"].get("likeCount", 0)),
+            "comment_count": int(v["statistics"].get("commentCount", 0)),
+            "thumbnail_url": v["snippet"]["thumbnails"]["high"]["url"],
+            "video_url": f"https://www.youtube.com/watch?v={v['id']}",
+            "fetched_at": datetime.utcnow().isoformat()
         })
 
-    # ✅ upsert باستخدام الـ unique index اللي عندك (platform,country,video_id)
-    supabase_endpoint = f"{SUPABASE_URL}/rest/v1/trends?on_conflict=platform,country,video_id"
+    endpoint = f"{SUPABASE_URL}/rest/v1/trends"
+    r = requests.post(endpoint, json=rows, headers=headers)
+    r.raise_for_status()
 
-    r = requests.post(supabase_endpoint, json=rows, headers=headers, timeout=30)
+def main():
+    print("=== SCRIPT STARTED ===")
+    videos = fetch_trending_videos()
+    print(f"Fetched {len(videos)} videos")
+    save_to_supabase(videos)
+    print("=== DONE ===")
 
-    # ✅ اطبع سبب الخطأ الحقيقي لو حصل 400/401/...
-    if r.status_code >= 300:
-        print("Supabase status:", r.status_code)
-        print("Supabase response:", r.text)
-        r.raise_for_status()
-
-    print("Saved to Supabase OK ✅")
+if __name__ == "__main__":
+    main()

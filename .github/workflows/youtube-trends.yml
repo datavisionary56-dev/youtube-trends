@@ -1,31 +1,96 @@
-name: Fetch YouTube Trends
+import os
+import requests
+from datetime import datetime
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
+# Environment variables (GitHub Secrets)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 
-jobs:
-  fetch-trends:
-    runs-on: ubuntu-latest
+# Settings
+COUNTRY = "SA"   # غيّرها لو حابب: EG, US, AE...
+MAX_RESULTS = 10
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+def fetch_trending_videos():
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        "part": "snippet,statistics",
+        "chart": "mostPopular",
+        "regionCode": COUNTRY,
+        "maxResults": MAX_RESULTS,
+        "key": YOUTUBE_API_KEY,
+    }
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+    r = requests.get(url, params=params, timeout=30)
+    print("YouTube status:", r.status_code)
 
-      - name: Run YouTube trends script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-        run: |
-          python scripts/fetch_youtube_trends.py
+    if r.status_code != 200:
+        print("YouTube error:", r.text[:500])
+        r.raise_for_status()
+
+    data = r.json()
+    return data.get("items", [])
+
+
+def save_to_supabase(videos):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+    if not videos:
+        print("No videos to save.")
+        return
+
+    endpoint = f"{SUPABASE_URL.rstrip('/')}/rest/v1/trends"
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        # لو عندك UNIQUE على (platform, country, video_id) هيساعد upsert
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+
+    now_iso = datetime.utcnow().isoformat()
+
+    rows = []
+    for v in videos:
+        snippet = v.get("snippet", {}) or {}
+        stats = v.get("statistics", {}) or {}
+        video_id = v.get("id")
+
+        rows.append({
+            "platform": "youtube",
+            "country": COUNTRY,
+            "video_id": video_id,
+            "title": snippet.get("title"),
+            "channel_title": snippet.get("channelTitle"),
+            "published_at": snippet.get("publishedAt"),
+            "thumbnail_url": (snippet.get("thumbnails", {}).get("high", {}) or {}).get("url"),
+            "video_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
+            "views": int(stats.get("viewCount", 0) or 0),
+            "likes": int(stats.get("likeCount", 0) or 0),
+            "comments": int(stats.get("commentCount", 0) or 0),
+            "fetched_at": now_iso,
+        })
+
+    r = requests.post(endpoint, json=rows, headers=headers, timeout=30)
+    print("Supabase status:", r.status_code)
+    print("Supabase response (first 500 chars):", (r.text or "")[:500])
+
+    # 201/200 نجاح غالبًا
+    if r.status_code >= 400:
+        r.raise_for_status()
+
+
+def main():
+    print("Fetching YouTube trending videos...")
+    videos = fetch_trending_videos()
+    print(f"Fetched {len(videos)} videos")
+
+    print("Saving to Supabase...")
+    save_to_supabase(videos)
+    print("Done ✅")
+
+
+if __name__ == "__main__":
+    main()

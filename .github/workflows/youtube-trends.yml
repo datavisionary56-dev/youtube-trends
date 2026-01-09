@@ -1,108 +1,31 @@
-import os
-import requests
-from datetime import datetime
+name: Fetch YouTube Trends
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
 
-# ============ Environment variables (GitHub Secrets) ============
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+jobs:
+  fetch-trends:
+    runs-on: ubuntu-latest
 
-# Optional env overrides
-COUNTRY = os.environ.get("COUNTRY", "US")          # default US (works reliably)
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "10"))
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-def require_env(name: str, value: str | None):
-    if not value:
-        raise RuntimeError(f"Missing environment variable: {name}")
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-
-def fetch_trending_videos():
-    url = "https://www.googleapis.com/youtube/v3/videos"
-    params = {
-        "part": "snippet,statistics",
-        "chart": "mostPopular",
-        "regionCode": COUNTRY,
-        "maxResults": MAX_RESULTS,
-        "key": YOUTUBE_API_KEY,
-    }
-
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    return data.get("items", []) or []
-
-
-def save_to_supabase(videos):
-    # REST endpoint for inserting rows into "trends" table
-    supabase_endpoint = f"{SUPABASE_URL}/rest/v1/trends"
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        # If you created a UNIQUE constraint (e.g. video_id), this helps UPSERT.
-        # Otherwise it still works as normal insert.
-        "Prefer": "resolution=merge-duplicates",
-    }
-
-    rows = []
-    now_iso = datetime.utcnow().isoformat()
-
-    for video in videos:
-        snippet = video.get("snippet", {}) or {}
-        stats = video.get("statistics", {}) or {}
-
-        video_id = video.get("id")
-        title = snippet.get("title", "")
-        channel_title = snippet.get("channelTitle", "")
-        published_at = snippet.get("publishedAt")
-        thumbnails = snippet.get("thumbnails", {}) or {}
-        thumb = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
-
-        rows.append({
-            "platform": "youtube",
-            "country": COUNTRY,
-            "video_id": video_id,
-            "title": title,
-            "channel_title": channel_title,
-            "published_at": published_at,
-            "thumbnail_url": thumb,
-            "video_url": f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
-            "views": int(stats.get("viewCount", 0) or 0),
-            "likes": int(stats.get("likeCount", 0) or 0),
-            "comments": int(stats.get("commentCount", 0) or 0),
-            "fetched_at": now_iso,
-        })
-
-    r = requests.post(supabase_endpoint, json=rows, headers=headers, timeout=30)
-
-    # Helpful debug if Supabase rejects the request
-    if not r.ok:
-        raise RuntimeError(f"Supabase insert failed: {r.status_code} {r.text}")
-
-    return True
-
-
-def main():
-    # Validate required secrets
-    require_env("SUPABASE_URL", SUPABASE_URL)
-    require_env("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_KEY)
-    require_env("YOUTUBE_API_KEY", YOUTUBE_API_KEY)
-
-    print(f"Fetching YouTube trending videos for COUNTRY={COUNTRY} ...")
-    videos = fetch_trending_videos()
-    print(f"Fetched {len(videos)} videos")
-
-    if len(videos) == 0:
-        print("No trending videos returned. Try changing COUNTRY to US/EG, or check quota/key restrictions.")
-        return
-
-    print("Saving to Supabase...")
-    save_to_supabase(videos)
-    print("Done ✅")
-
-
-if __name__ == "__main__":
-    main()
+      - name: Run YouTube trends script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          python scripts/fetch_youtube_trends.py
